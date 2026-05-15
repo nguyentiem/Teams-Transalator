@@ -19,59 +19,99 @@ import speech_recognition as sr
 from googletrans import Translator
 
 # ─────────────────────────── Constants ────────────────────────────
-SAMPLE_RATE = 16000
-CHUNK_DURATION = 4        # seconds per recognition chunk
-CHANNELS = 1
-SILENCE_THRESHOLD = 0.005  # RMS threshold to skip silent chunks
+SAMPLE_RATE      = 16000
+CHANNELS         = 1
+FRAME_MS         = 100    # ms mỗi frame đo RMS (100ms = 1600 samples)
+RMS_THRESHOLD    = 0.005  # ngưỡng phân biệt có tiếng / im lặng
+SILENCE_TRIGGER  = 0.8    # im lặng bao lâu (giây) thì flush → STT
+MIN_SPEECH_SEC   = 0.4    # buffer tối thiểu mới đáng gửi STT
+MAX_CHUNK_SEC    = 5.0    # flush bắt buộc dù vẫn còn tiếng
 
 
 # ─────────────────────────── Audio Capture Thread ──────────────────
 class AudioCaptureThread(threading.Thread):
-    """Captures system audio (loopback) and pushes chunks into a queue."""
+    """
+    Captures system audio (loopback) với VAD pure-numpy.
+    Flush buffer khi:
+      - im lặng >= SILENCE_TRIGGER giây, VÀ buffer >= MIN_SPEECH_SEC
+      - hoặc buffer >= MAX_CHUNK_SEC (tránh chunk quá dài)
+    """
 
     def __init__(self, audio_queue: queue.Queue, stop_event: threading.Event):
         super().__init__(daemon=True)
         self.audio_queue = audio_queue
         self.stop_event = stop_event
-        self.mic = None
 
     def _get_loopback_mic(self):
-        """Find the default loopback (system audio) device."""
         try:
             mics = sc.all_microphones(include_loopback=True)
-            # Prefer explicit loopback devices
             for m in mics:
-                if "loopback" in m.name.lower() or "stereo mix" in m.name.lower() or "what u hear" in m.name.lower():
+                if any(kw in m.name.lower() for kw in ("loopback", "stereo mix", "what u hear", "cable")):
                     return m
-            # Fallback: first loopback available
             for m in mics:
                 if hasattr(m, '_is_loopback') and m._is_loopback:
                     return m
-            # Last resort: default loopback
             return sc.get_microphone(id=str(sc.default_speaker().name), include_loopback=True)
         except Exception:
             return None
 
+    def _flush(self, buffer: list) -> None:
+        """Ghép buffer → PCM bytes → đẩy vào queue."""
+        if not buffer:
+            return
+        audio = np.concatenate(buffer)
+        pcm = (audio * 32767).astype(np.int16).tobytes()
+        self.audio_queue.put(("audio", pcm))
+
     def run(self):
         mic = self._get_loopback_mic()
         if mic is None:
-            self.audio_queue.put(("error", "Không tìm thấy thiết bị system audio (loopback).\n"
-                                           "Hãy bật 'Stereo Mix' trong Sound Settings của Windows."))
+            self.audio_queue.put(("error",
+                "Không tìm thấy thiết bị system audio (loopback).\n"
+                "Hãy bật 'Stereo Mix' trong Sound Settings của Windows."))
             return
 
-        frames_per_chunk = SAMPLE_RATE * CHUNK_DURATION
+        frames_per_frame = int(SAMPLE_RATE * FRAME_MS / 1000)  # 1600 samples
+        silence_frames_needed = int(SILENCE_TRIGGER * 1000 / FRAME_MS)  # 8 frames
+        min_speech_frames     = int(MIN_SPEECH_SEC  * 1000 / FRAME_MS)  # 4 frames
+        max_buffer_frames     = int(MAX_CHUNK_SEC   * 1000 / FRAME_MS)  # 50 frames
+
+        speech_buffer: list  = []   # tích lũy frames có tiếng
+        silence_count: int   = 0    # số frame im lặng liên tiếp
+
         try:
             with mic.recorder(samplerate=SAMPLE_RATE, channels=CHANNELS) as recorder:
                 while not self.stop_event.is_set():
-                    data = recorder.record(numframes=frames_per_chunk)
-                    # Convert to mono float32
-                    if data.ndim > 1:
-                        data = data[:, 0]
-                    rms = float(np.sqrt(np.mean(data ** 2)))
-                    if rms > SILENCE_THRESHOLD:
-                        # Convert to 16-bit PCM bytes for speech_recognition
-                        pcm = (data * 32767).astype(np.int16).tobytes()
-                        self.audio_queue.put(("audio", pcm))
+                    frame = recorder.record(numframes=frames_per_frame)
+                    if frame.ndim > 1:
+                        frame = frame[:, 0]
+
+                    rms = float(np.sqrt(np.mean(frame ** 2)))
+                    is_speech = rms > RMS_THRESHOLD
+
+                    if is_speech:
+                        speech_buffer.append(frame)
+                        silence_count = 0
+
+                        # Flush bắt buộc nếu buffer quá dài
+                        if len(speech_buffer) >= max_buffer_frames:
+                            self._flush(speech_buffer)
+                            speech_buffer = []
+                            silence_count = 0
+                    else:
+                        # Frame im lặng — vẫn append vào buffer nếu đang có speech
+                        # (để không cắt giữa chừng do ngập ngừng ngắn)
+                        if speech_buffer:
+                            silence_count += 1
+                            speech_buffer.append(frame)
+
+                            if silence_count >= silence_frames_needed:
+                                # Im lặng đủ lâu → flush nếu buffer đủ dài
+                                if len(speech_buffer) >= min_speech_frames:
+                                    self._flush(speech_buffer)
+                                speech_buffer = []
+                                silence_count = 0
+
         except Exception as e:
             self.audio_queue.put(("error", f"Lỗi capture audio: {e}"))
 
