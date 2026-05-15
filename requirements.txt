@@ -1,0 +1,5 @@
+soundcard==0.4.3
+SpeechRecognition==3.12.0
+googletrans==4.0.0rc1
+numpy==1.26.4
+pyaudio==0.2.14
