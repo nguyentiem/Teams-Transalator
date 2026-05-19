@@ -1,0 +1,16 @@
+# Build artifacts
+build/
+dist/
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Installer and packaging metadata
+*.egg-info/
+.Python
+
+# VS Code
+.vscode/

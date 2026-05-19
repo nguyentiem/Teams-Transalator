@@ -13,6 +13,11 @@ import datetime
 import os
 import sys
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LIBS_DIR = os.path.join(BASE_DIR, "libs")
+if LIBS_DIR not in sys.path:
+    sys.path.insert(0, LIBS_DIR)
+
 import soundcard as sc
 import numpy as np
 import speech_recognition as sr

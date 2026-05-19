@@ -36,9 +36,14 @@ Chạy TeamsTranslator.exe
 
 ### Option B – Chạy từ source
 ```bash
-pip install -r requirements.txt
 python main.py
 ```
+
+> Nếu bạn clone project từ repo, thư mục `libs/` đã chứa sẵn dependency nên không cần tải lại.
+> Nếu muốn cập nhật dependency trong project, chạy:
+> ```bash
+> pip install -r requirements.txt -t libs
+> ```
 
 ### Option C – Build .exe tự
 ```bash
